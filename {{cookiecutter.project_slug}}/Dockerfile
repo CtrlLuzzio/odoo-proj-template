@@ -120,6 +120,7 @@ COPY [".eslint.yml", "ruff.toml", "/mnt/"]
 {% endif %}
 COPY wait-for-psql.py /usr/local/bin/wait-for-psql.py
 
+RUN chmod +x /entrypoint.sh /usr/local/bin/wait-for-psql.py
 # Set default user when running the container
 USER odoo
 
