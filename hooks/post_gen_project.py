@@ -1,14 +1,13 @@
+import hashlib
+import os
+import re
 import shutil
 import subprocess
 import sys
-import os
 import time
-import hashlib
-import re
-
 from configparser import RawConfigParser
 from pathlib import Path
-from typing import List, Dict, Tuple
+from typing import Dict, List, Tuple
 
 
 class FileReplace:
@@ -79,10 +78,19 @@ def generate_volume_block(addons_list: List[str], always_include: List[str] = No
     return f"VOLUME [{', '.join(f'"{v}"' for v in all_volumes)}]"
 
 
-def execute_git(*args) -> str:
+def execute_git(cmds: List[str], verbose: bool = False) -> (bool, str):
     try:
-        output = subprocess.run(["git", *args], capture_output=True, check=True)
-        return False, output.stdout.decode("utf-8")
+        if verbose:
+            PIPE = subprocess.PIPE
+            process = subprocess.Popen(["git"] + cmds, stdout=PIPE, text=True, bufsize=1)
+            for line in iter(process.stdout.readline, ""):
+                print(line.strip())
+
+            process.stdout.close()
+            return False, ""
+        else:
+            output = subprocess.run(["git"] + cmds, capture_output=True, check=True)
+            return False, output.stdout.decode("utf-8")
     except Exception as ex:
         return True, ex.stderr.decode("utf-8")
 
@@ -159,10 +167,10 @@ composefile = os.path.join(CWD, "docker-compose.yml")
 dockerfile = os.path.join(CWD, "Dockerfile")
 repository = "git@{{ cookiecutter.git_server }}:{{ cookiecutter.github_user }}/{{ cookiecutter.github_repo }}.git"
 GIT_COMMANDS_QUEUE = [
-    ["init"],
-    ["remote", "add", "origin", repository],
-    ["fetch", "origin"],
-    ["remote", "set-head", "origin", "--auto"]
+    (["init"], False),
+    (["remote", "add", "origin", repository], False),
+    (["fetch", "origin"], True),
+    (["remote", "set-head", "origin", "--auto"], False)
 ]
 
 if "{{ cookiecutter.odoo_version }}" != "19.0":
@@ -178,21 +186,21 @@ if "{{ cookiecutter.github_user }}" != "ExampleUser" and "{{ cookiecutter.github
         print("Template '.gitignore' will be deleted because it may block checkout.")
         os.remove(os.path.join(CWD, ".gitignore"))
 
-    for commands in GIT_COMMANDS_QUEUE:
-        err, output = execute_git(*commands)
+    for commands, verbose in GIT_COMMANDS_QUEUE:
+        err, output = execute_git(commands, verbose=verbose)
         if err:
             print(output)
             sys.exit(1)
         if output:
             print(output)
 
-    _, branch = execute_git("symbolic-ref", "refs/remotes/origin/HEAD", "--short")
+    _, branch = execute_git(["symbolic-ref", "refs/remotes/origin/HEAD", "--short"])
     branch = branch.strip("\n").split("/")[1]
 
-    err, output = execute_git("checkout", branch)
-    if err:
-        print(output)
-        sys.exit(1)
+    execute_git(["checkout", branch], verbose=True)
+
+    if os.path.exists(os.path.join(CWD, ".gitmodules")):
+        execute_git(["submodule", "update", "--init", "--recursive", "--progress"], verbose=True)
 
 modules_container = []
 modules = []
@@ -201,13 +209,15 @@ for root_folder, dummy, file_names in os.walk(CWD):
         tmp_file_path = Path(os.path.join(root_folder, MODULE_INDEX)).relative_to(CWD)
         level = len(tmp_file_path.parents) - 1
 
-        folder = root_folder.split("/")[-1 * level]
-        if folder in modules or folder in modules_container:
-            continue
-
         if level == 1:
-            modules.append(folder)
-        elif level == 2:
+            folder = str(tmp_file_path.parent)
+            if folder in modules:
+                continue
+            modules.append(str(folder))
+        else:
+            folder = str(tmp_file_path.parent.parent)
+            if folder in modules_container:
+                continue
             modules_container.append(folder)
 
 config.read([rcfile])
@@ -215,9 +225,13 @@ config["options"]["admin_passwd"] = hashlib.sha1(str(time.time()).encode()).hexd
 
 if modules_container:
     shutil.rmtree(os.path.join(CWD, "addons"))
-    volume_modules = [f"/mnt/{f.replace('_', '-')}-addons" for f in modules_container]
-    config_file_str = ",".join(volume_modules)
-    config["options"]["addons_path"] = config_file_str
+
+    volume_modules = []
+    for container in modules_container:
+        tmp_container = container.split("/")
+        volume_modules.append(f"/mnt/{tmp_container[-1]}")
+
+    config["options"]["addons_path"] = ",".join(volume_modules)
 
     dockerfile_replacer = DockerfileReplacer(dockerfile)
     compose_replacer = ComposeReplacer(composefile)
